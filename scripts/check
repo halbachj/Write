@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# Central check entry point used by both developers and CI:
+#   scripts/check quick    - formatting (check-only), Nix checks, workflow
+#                            validation, secret scan, lint of changed C++
+#   scripts/check linux    - quick + Linux build + headless regression suite
+#   scripts/check android  - Android build + explicit lint (needs .#android shell)
+#   scripts/check static   - clang-tidy on a real compile database (see below)
+#
+# All subcommands work from any working directory, use bounded execution, and
+# return conventional exit statuses. CI runs the check-only variants: nothing
+# here repairs formatting, updates lock files, or regenerates expected outputs.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$REPO_ROOT"
+
+fail() { echo "check: FAIL: $*" >&2; exit 1; }
+info() { echo "check: $*"; }
+
+need_tool() {
+  command -v "$1" >/dev/null 2>&1 || fail "required tool '$1' not found - run inside: nix develop"
+}
+
+run_quiet() {
+  # run a command, show its output only on failure (keeps logs readable)
+  local log
+  log="$(mktemp /tmp/write-check.XXXXXX.log)"
+  "$@" >"$log" 2>&1
+  local status=$?
+  if [[ $status -eq 0 ]]; then
+    rm -f "$log"
+    return 0
+  fi
+  echo "check: command failed (status $status): $*" >&2
+  tail -n 40 "$log" >&2
+  rm -f "$log"
+  return "$status"
+}
+
+cmd_quick() {
+  for tool in statix deadnix actionlint gitleaks shellcheck; do
+    need_tool "$tool"
+  done
+
+  info "[quick] treefmt check (no changes allowed)"
+  run_quiet nix run .#formatter."$(nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null || echo x86_64-linux)" -- --fail-on-change --no-cache \
+    || fail "files need formatting; run 'nix fmt' and review the diff"
+
+  info "[quick] nix flake check (no lock updates)"
+  run_quiet nix flake check --no-update-lock-file || fail "nix flake check failed"
+
+  info "[quick] statix / deadnix"
+  run_quiet sh -c 'statix check flake.nix' || fail "statix findings in flake.nix"
+  run_quiet sh -c 'deadnix --fail flake.nix' || fail "deadnix found unused bindings in flake.nix"
+
+  info "[quick] actionlint (GitHub workflows)"
+  run_quiet sh -c 'actionlint' || fail "actionlint found workflow problems"
+
+  info "[quick] gitleaks full-tree scan (CI additionally scans the commit range)"
+  run_quiet sh -c 'gitleaks git --redact . ' || fail "gitleaks found potential secrets"
+
+  info "[quick] ShellCheck for scripts/"
+  local sc_errors=0
+  while IFS= read -r -d '' f; do
+    run_quiet shellcheck -s bash "$f" || sc_errors=1
+  done < <(find scripts -name '*.sh' -print0 2>/dev/null)
+  [[ $sc_errors -eq 0 ]] || fail "shellcheck failed for scripts/"
+
+  info "[quick] clang-format check for changed C/C++ files"
+  # Opt-in: clang-format's operator spacing cannot reproduce this codebase's
+  # compact style (e.g. `w*avg()`, `Point(0,0)`), so enforcing it on legacy
+  # files requires a dedicated mechanical patch first (see docs/safeguards.md).
+  # New-from-scratch C++ files should set WRITE_ENFORCE_CPP_FORMAT=1 locally.
+  if [[ "${WRITE_ENFORCE_CPP_FORMAT:-0}" == "1" ]]; then
+    check_changed_cpp_format || fail "changed C/C++ files need clang-format (see .clang-format)"
+  else
+    info "skipped (opt-in via WRITE_ENFORCE_CPP_FORMAT=1; legacy onboarding pending)"
+  fi
+
+  info "[quick] OK"
+}
+
+# Only C++ files changed relative to the default branch are checked, so legacy
+# sources can be onboarded incrementally without a wholesale reformat.
+check_changed_cpp_format() {
+  local base
+  base="$(git merge-base HEAD "@{upstream}" 2>/dev/null || git rev-parse origin/master 2>/dev/null || true)"
+  [[ -n "$base" ]] || { info "no upstream base found; skipping changed-C++ format check"; return 0; }
+  local -a files=()
+  while IFS= read -r f; do
+    [[ -f "$f" ]] && files+=("$f")
+  done < <(git diff --name-only "$base" HEAD -- '*.cpp' '*.h' '*.c' | grep -Ev '^(SDL|ugui|ulib|usvg|nanovgXC|pugixml|miniz|stb)/')
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  info "checking format of ${#files[@]} changed C/C++ file(s)"
+  local bad=0
+  for f in "${files[@]}"; do
+    clang-format --dry-run --Werror "$f" 2>/dev/null || { echo "needs formatting: $f" >&2; bad=1; }
+  done
+  return $bad
+}
+
+cmd_linux() {
+  cmd_quick
+  info "[linux] building Debug binary (with sanitizers per Makefile.unix)"
+  run_quiet nix develop .#linux -c make -C syncscribble DEBUG=1 USE_SYSTEM_SDL=1 -j"$(nproc)" \
+    || fail "Linux debug build failed (compile errors are failures)"
+
+  info "[linux] headless regression suite"
+  run_quiet nix develop .#linux -c scripts/run-tests.sh \
+    || fail "regression suite failed (see the runner output above)"
+
+  info "[linux] application smoke test"
+  run_quiet nix develop .#linux -c scripts/smoke-linux.sh \
+    || fail "Linux application smoke test failed"
+  info "[linux] OK"
+}
+
+cmd_android() {
+  info "[android] Gradle build (debug) + explicit lint"
+  export ANDROID_HOME="${ANDROID_HOME:-}"
+  [[ -n "$ANDROID_HOME" ]] || fail "ANDROID_HOME not set; run inside: nix develop .#android"
+  [[ -n "${WRITE_ANDROID_SDL:-}" && -d "${WRITE_ANDROID_SDL:-}" ]] \
+    || fail "WRITE_ANDROID_SDL not set; use the pinned nix develop .#android shell"
+
+  # The superproject records the SDL Windows revision, while Android needs its
+  # separately pinned Android SDL revision. Build a disposable copy instead of
+  # switching the user's submodule checkout or fetching a moving branch.
+  local work
+  work="$(mktemp -d /tmp/write-android-build.XXXXXX)"
+  trap 'rm -rf "$work"' RETURN
+  tar --exclude-vcs \
+    --exclude='./syncscribble/Debug' \
+    --exclude='./syncscribble/Release' \
+    --exclude='./syncscribble/android/.gradle' \
+    --exclude='./syncscribble/android/app/build' \
+    -cf - . | tar -xf - -C "$work"
+  rm -rf "$work/SDL"
+  cp -a "$WRITE_ANDROID_SDL" "$work/SDL"
+  chmod -R u+w "$work/SDL"
+
+  (
+    cd "$work/syncscribble/android" || exit 1
+    # lintDebug honors abortOnError; assembleDebug proves the tree compiles.
+    ./gww lintDebug assembleDebug
+  ) || fail "Android build/lint failed"
+
+  if [[ -n "${WRITE_ANDROID_ARTIFACT_DIR:-}" ]]; then
+    mkdir -p "$WRITE_ANDROID_ARTIFACT_DIR"
+    cp -a "$work/syncscribble/android/app/build/reports" "$WRITE_ANDROID_ARTIFACT_DIR/" 2>/dev/null || true
+    cp -a "$work/syncscribble/android/app/build/outputs" "$WRITE_ANDROID_ARTIFACT_DIR/" 2>/dev/null || true
+  fi
+  info "[android] OK"
+}
+
+cmd_static() {
+  info "[static] clang-tidy via real compile database"
+  local db="compile_commands.json"
+  if [[ ! -f "$db" ]]; then
+    info "no compile database; capturing one with bear (clean rebuild)"
+    run_quiet nix develop .#linux -c sh -c \
+      'make -C syncscribble DEBUG=1 clean >/dev/null 2>&1; bear -- make -C syncscribble DEBUG=1 USE_SYSTEM_SDL=1 -j'"$(nproc)" \
+      || fail "failed to capture compile database"
+  fi
+  [[ -f "$db" ]] || fail "compile database still missing after capture"
+  # Curated, correctness-oriented analysis of document/save, stroke, and input
+  # paths. This is deliberately not changed-line-only analysis.
+  run_quiet nix develop .#linux -c clang-tidy -p . --quiet --warnings-as-errors='*' \
+    syncscribble/document.cpp \
+    syncscribble/scribbledoc.cpp \
+    syncscribble/strokebuilder.cpp \
+    syncscribble/scribbleinput.cpp \
+    || fail "clang-tidy findings (curated set in .clang-tidy)"
+  info "[static] OK"
+}
+
+case "${1:-}" in
+  quick) cmd_quick ;;
+  linux) cmd_linux ;;
+  android) cmd_android ;;
+  static) cmd_static ;;
+  *) echo "usage: $0 {quick|linux|android|static}" >&2; exit 64 ;;
+esac

@@ -59,9 +59,12 @@ android {
 
 
     lintOptions {
-        // google suddenly decided I needed to download intellij, kotlin, groovy, play-sdk, etc. to build a simple APK
-        checkReleaseBuilds false
-        abortOnError false
+        // CI runs lintDebug and lintRelease explicitly. Do not allow lint errors
+        // to masquerade as a successful Android build.
+        checkReleaseBuilds true
+        abortOnError true
+        // The project intentionally targets API 29 for compatibility; raising
+        // targetSdk is a separate, reviewed product/runtime change.
         disable 'ExpiredTargetSdkVersion'
     }
 }

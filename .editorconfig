@@ -1,0 +1,29 @@
+# EditorConfig: https://editorconfig.org
+# Basic hygiene for all tracked text files. Language-specific formatting is
+# owned by the Nix-provided toolchain (nix fmt / clang-format / shfmt).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefiles MUST keep recipe tabs
+[{Makefile,Makefile.*,SDL-Makefile.*,*.mk}]
+indent_style = tab
+
+[*.{c,cc,cpp,h,hpp}]
+indent_style = space
+indent_size = 2
+
+[*.{nix,py,sh,bash}]
+indent_style = space
+indent_size = 2
+
+[*.{yml,yaml,json}]
+indent_style = space
+indent_size = 2

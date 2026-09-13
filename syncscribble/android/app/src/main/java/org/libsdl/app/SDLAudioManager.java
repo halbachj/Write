@@ -325,6 +325,11 @@ public class SDLAudioManager
 
     /** This method is called by SDL using JNI. */
     public static int captureReadFloatBuffer(float[] buffer, boolean blocking) {
+        // The float-buffer overload with read mode was added in API 23. Keep
+        // minSdk 21 devices from calling an unavailable platform method.
+        if (Build.VERSION.SDK_INT < 23) {
+            return 0;
+        }
         return mAudioRecord.read(buffer, 0, buffer.length, blocking ? AudioRecord.READ_BLOCKING : AudioRecord.READ_NON_BLOCKING);
     }
 

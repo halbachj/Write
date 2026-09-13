@@ -1,0 +1,25 @@
+# Sensitive paths require review from the repository owner organization.
+# If ownership changes, update this file and branch-protection rules together.
+
+/AGENTS.md @styluslabs
+/CODEOWNERS @styluslabs
+/CONTRIBUTING.md @styluslabs
+/docs/safeguards.md @styluslabs
+/.github/ @styluslabs
+/scripts/ @styluslabs
+/flake.nix @styluslabs
+/flake.lock @styluslabs
+/.envrc @styluslabs
+/.clang-format @styluslabs
+/.clang-tidy @styluslabs
+/.statix.toml @styluslabs
+/.gitmodules @styluslabs
+/scribbletest/ @styluslabs
+/syncscribble/document.* @styluslabs
+/syncscribble/scribbledoc.* @styluslabs
+/syncscribble/strokebuilder.* @styluslabs
+/syncscribble/scribbleinput.* @styluslabs
+/syncscribble/scribblewidget.* @styluslabs
+/syncscribble/android/ @styluslabs
+/scribbleres/ @styluslabs
+/xcode/ @styluslabs

@@ -1,0 +1,27 @@
+# Write C++ style - mirrors the existing codebase conventions (see syncscribble/):
+# 2-space indents, attached braces, `Type* name`, no space before parens in
+# control statements. ColumnLimit 0 keeps existing line breaks: clang-format
+# normalizes spacing/indent without rewrapping, so legacy files can be
+# onboarded incrementally instead of via a wholesale reformat.
+---
+Language: Cpp
+ColumnLimit: 0
+UseTab: Never
+IndentWidth: 2
+TabWidth: 2
+PointerAlignment: Left
+DerivePointerAlignment: false
+SpaceBeforeParens: Never
+BreakBeforeBraces: Attach
+IndentCaseLabels: false
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: true
+MaxEmptyLinesToKeep: 2
+SortIncludes: false
+IncludeBlocks: Preserve
+FixNamespaceComments: false
+PointerBindsToType: true
+Standard: c++14

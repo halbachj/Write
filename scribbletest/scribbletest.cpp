@@ -28,6 +28,7 @@ ScribbleTest::ScribbleTest(const std::string& path)
 {
   scribbleConfig = new ScribbleConfig();
   scribbleConfig->set("singleFile", true);
+
   scribbleConfig->set("reduceFileSize", 0);
   // don't use panBorder
   scribbleConfig->set("panFromEdge", false);
@@ -61,7 +62,22 @@ ScribbleTest::ScribbleTest(const std::string& path)
   //bookmarkArea->setScribbleDoc(scribbleDoc);
   syncSlave = NULL;
   waitForSyncDone = false;
+  // SCRIBBLE_TEST_OUT redirects all writable output (_out files, diffs, temp
+  //  documents, summary) to an isolated directory. SCRIBBLE_TEST_REF can
+  //  separately redirect read-only _in/_ref fixtures for failure injection.
+  //  Without either environment variable, behavior is unchanged.
+  refPath = path;
   outPath = path;
+  if(const char* refdir = getenv("SCRIBBLE_TEST_REF")) {
+    refPath = refdir;
+    if(refPath.empty() || refPath.back() != '/')
+      refPath += '/';
+  }
+  if(const char* outdir = getenv("SCRIBBLE_TEST_OUT")) {
+    outPath = outdir;
+    if(outPath.empty() || outPath.back() != '/')
+      outPath += '/';
+  }
   // setup ScribbleArea
   scribbleDoc->newDocument();
   screenRect = Rect::ltwh(0,0,600,800);
@@ -156,10 +172,11 @@ void ScribbleTest::syncSlaveMsg(std::string msg, int level)
   distributeTransform(scribbleDoc->document);
   // write output file
   std::string basefile = fstring("%s/test%d", outPath.c_str(), syncTestNum);
+  std::string reffile = fstring("%s/test%d", refPath.c_str(), syncTestNum);
   std::string outfile = basefile + "_out.html";
   scribbleDoc->saveDocument(outfile.c_str());
   // compare output to reference; tests of one-file-per-page must handle the svg files themselves
-  if(testCompareFiles(outfile.c_str(), (basefile + "_ref.html").c_str(), true))
+  if(testCompareFiles(outfile.c_str(), (reffile + "_ref.html").c_str(), true))
     scribbleDoc->document->deleteFiles();  //remove(outfile.c_str());
   else
     ++nFailed;
@@ -187,6 +204,35 @@ bool ScribbleTest::testCompareFiles(const char* f1, const char* f2, bool svgonly
   return b1.size() == b2.size() && strcmp(b1.data(), b2.data()) == 0;
 }
 
+// tolerance-based thumbnail comparison: refs were generated on a specific GPU/stack,
+//  so cross-platform antialiasing/rasterization produces small per-pixel deltas that
+//  never match byte-exactly; a thumbnail only fails if pixels differ by more than
+//  maxDelta on more than maxFracChanged of the image (i.e., a visible rendering
+//  difference, not rasterization noise) or if dimensions differ
+bool ScribbleTest::thumbnailsCloseEnough(const Image& ref, const Image& out, int maxDelta, double maxFracChanged)
+{
+  if(ref.width != out.width || ref.height != out.height)
+    return false;
+  const unsigned char* a = ref.constBytes();
+  const unsigned char* b = out.constBytes();
+  size_t changed = 0;
+  size_t n = (size_t)ref.width*ref.height;
+  for(size_t ii = 0; ii < n; ++ii, a += 4, b += 4) {
+    if(std::max(std::max(ABS((int)a[0] - (int)b[0]), ABS((int)a[1] - (int)b[1])), ABS((int)a[2] - (int)b[2])) > maxDelta)
+      ++changed;
+  }
+  return double(changed)/n <= maxFracChanged;
+}
+
+bool ScribbleTest::writeSummaryFile(const std::string& filename, const std::string& body)
+{
+  FILE* fp = fopen(filename.c_str(), "w");
+  if(!fp)
+    return false;
+  bool ok = fputs(body.c_str(), fp) != EOF && fclose(fp) == 0;
+  return ok;
+}
+
 // a bunch of integration tests ... any "*_out.html" files present after test indicate a failure
 // TODO: add some tests to capture scribbleArea->imgPaint->image and compare to a ref
 
@@ -194,7 +240,9 @@ void ScribbleTest::runAll(bool runsynctest)
 {
   nFailed = 0;
   int nThumbsFailed = 0;
+  int nExecuted = 0;
   std::vector<std::string> slFailed;
+  std::vector<std::string> slThumbsFailed;
   void (ScribbleTest::*tests[])() = {
     &ScribbleTest::test0,
     &ScribbleTest::test1,
@@ -222,6 +270,7 @@ void ScribbleTest::runAll(bool runsynctest)
     // we are testuser1; slave is testuser2
     scribbleConfig->set("syncUser", "testuser1");
     syncSlave = new ScribbleTest(outPath);
+    syncSlave->refPath = refPath;
     syncSlave->scribbleConfig->set("syncUser", "testuser2");
     syncSlave->scribbleConfig->set("syncServer", scribbleConfig->String("syncServer"));
     syncSlave->nFailed = 0;
@@ -239,12 +288,13 @@ void ScribbleTest::runAll(bool runsynctest)
   srandpp(1);  // randomStr now used for bookmark ids
   Timestamp runAllTime = mSecSinceEpoch();
   for(unsigned int ii = 0; true; ii++) {
-    std::string basefile = fstring("%s/test%d", outPath.c_str(), ii);
+    std::string basefile = fstring("%s/test%d", refPath.c_str(), ii);
+    std::string outbasefile = fstring("%s/test%d", outPath.c_str(), ii);
     doCommand(ID_RESETZOOM);
     // enable this to update ref files (saving as *_new.html)
 #ifdef REFRESH_REFS
     if(scribbleDoc->openDocument((basefile + "_ref.html").c_str()) == Document::LOAD_OK)
-      scribbleDoc->saveDocument((basefile + "_new.html").c_str());
+      scribbleDoc->saveDocument((outbasefile + "_new.html").c_str());
 #endif
 
     scribbleDoc->newDocument();
@@ -286,6 +336,8 @@ void ScribbleTest::runAll(bool runsynctest)
     else if(ii >= nonsynctests)
       break;
 
+    ++nExecuted;
+
     // array of pointers to member functions, wow...
     (this->*tests[ii])();
 
@@ -312,7 +364,7 @@ void ScribbleTest::runAll(bool runsynctest)
       dirtycount += scribbleDoc->document->pages[pp]->dirtyCount;
     scribbleDoc->cfg->set("test_dirtyCount", dirtycount);
     // write output file
-    std::string outfile = basefile + "_out.html";
+    std::string outfile = outbasefile + "_out.html";
     if(!scribbleDoc->saveDocument(outfile.c_str()))
       SCRIBBLE_LOG("ScribbleTest: error saving %s", outfile.c_str());
     // compare output to reference; tests of one-file-per-page must handle the svg files themselves
@@ -322,15 +374,16 @@ void ScribbleTest::runAll(bool runsynctest)
     else if(testCompareFiles(outfile.c_str(), (basefile + "_ref.html").c_str(), true)) {
       Image refthumb = ScribbleDoc::extractThumbnail((basefile + "_ref.html").c_str());
       Image outthumb = ScribbleDoc::extractThumbnail(outfile.c_str());
-      if(outthumb != refthumb) {  //Application::painter->sRGB() &&  && Application::glRender
+      if(!thumbnailsCloseEnough(refthumb, outthumb, 16, 0.025)) {
         nThumbsFailed++;
-        std::ofstream refstrm((basefile + "_ref.png").c_str(), std::ios::binary);
+        slThumbsFailed.push_back(std::to_string(ii));
+        std::ofstream refstrm((outbasefile + "_ref.png").c_str(), std::ios::binary);
         auto refenc = refthumb.encodePNG();
         refstrm.write((char*)refenc.data(), refenc.size());
-        std::ofstream outstrm((basefile + "_out.png").c_str(), std::ios::binary);
+        std::ofstream outstrm((outbasefile + "_out.png").c_str(), std::ios::binary);
         auto outenc = outthumb.encodePNG();
         outstrm.write((char*)outenc.data(), outenc.size());
-        std::ofstream diffstrm((basefile + "_diff.png").c_str(), std::ios::binary);
+        std::ofstream diffstrm((outbasefile + "_diff.png").c_str(), std::ios::binary);
         auto diffenc = outthumb.subtract(refthumb, 10, 0).encodePNG();
         diffstrm.write((char*)diffenc.data(), diffenc.size());
       }
@@ -339,6 +392,12 @@ void ScribbleTest::runAll(bool runsynctest)
       slFailed.push_back(std::to_string(ii));
       nFailed++;
     }
+  }
+  // document-integrity corpus test (self-contained semantic assertions; not part of
+  //  the ref-file comparison loop, so it cannot collide with sync-test indices)
+  if(!syncSlave) {
+    ++nExecuted;
+    test16();
   }
   runAllTime = mSecSinceEpoch() - runAllTime;
   // restore global config
@@ -349,13 +408,30 @@ void ScribbleTest::runAll(bool runsynctest)
   ScribbleApp::app->loadConfig();
   if(syncSlave)
     nFailed = syncSlave->nFailed;
-  resultStr = fstring("Tests completed in %d ms with %d failed tests (%s) and %d failed thumbnails.",
-      int(runAllTime), nFailed, joinStr(slFailed, ", ").c_str(), nThumbsFailed);
+  resultStr = fstring("Tests completed in %d ms with %d failed tests (%s) and %d failed thumbnails (%s).",
+      int(runAllTime), nFailed, joinStr(slFailed, ", ").c_str(), nThumbsFailed, joinStr(slThumbsFailed, ", ").c_str());
   //if(!Application::painter->sRGB() || !Application::glRender)
   //  resultStr += "\nWARNING: ScribbleTest requires GL render and sRGB=1 to get correct thumbnails!";
   if(exitAfterTest) {
     SCRIBBLE_LOG(resultStr.c_str());
-    exit(nFailed * 0x100 + nThumbsFailed);
+    // NOTE: exit statuses are truncated to 8 bits by wait(), so encoding failure
+    //  counts in high bits (as an earlier version did: nFailed*0x100 + nThumbsFailed)
+    //  silently reported "success" for any nFailed < 256!  Use conventional statuses.
+    unsigned int expectedtests = runsynctest ? totaltests : nonsynctests + 1;  // + corpus test
+    int exitStatus = EXIT_OK;
+    if(nExecuted != int(expectedtests)) {
+      exitStatus = EXIT_EXECUTION_ERROR;
+      SCRIBBLE_LOG("EXECUTION ERROR: expected %d tests, executed %d - not reporting success", expectedtests, nExecuted);
+    }
+    else if(nFailed > 0)
+      exitStatus = EXIT_TESTS_FAILED;
+    else if(nThumbsFailed > 0)
+      exitStatus = EXIT_THUMBS_FAILED;
+    // machine-readable summary for CI/test runners (script asserts these values)
+    writeSummaryFile(outPath + "/test-summary.txt", fstring(
+        "tests_executed=%d\ntests_failed=%d\nthumbnail_failed=%d\nfailed_tests=%s\nthumbnail_failures=%s\n",
+        nExecuted, nFailed, nThumbsFailed, joinStr(slFailed, ",").c_str(), joinStr(slThumbsFailed, ",").c_str()));
+    exit(exitStatus);
   }
 }
 
@@ -1428,6 +1504,128 @@ void ScribbleTest::test15()
   undo();
   undo();
   doCommand(ID_PASTE);
+}
+
+// test16 - document-integrity corpus: build a document containing representative
+//  supported content (vector strokes, pressure-width stroke, hyperref, bookmark,
+//  multiple pages, and unknown SVG attributes/elements), then verify that
+//  save/reopen cycles in html, svg, and svgz formats preserve semantic content,
+//  that a subsequent edit is preserved by another cycle, and that failed saves
+//  are reported as failures while previously saved content remains recoverable
+void ScribbleTest::test16()
+{
+  scribbleArea->gotoPos(0, Point(0,0));
+  PageProperties props(700, 800, 0, 40, 100);
+  scribbleDoc->setPageProperties(&props, false, true, false);
+  int errs = 0;
+
+  // vector stroke
+  s2(100, 100);
+  // pressure-sensitive stroke (WIDTH_PR pen)
+  f2(200, 150);
+  // hyperref (two strokes wrapped in a link element)
+  hr(300, 200);
+  // bookmark (link target)
+  scribbleMode->setMode(MODE_BOOKMARK);
+  ie(120, 300, 0, pen, press);
+  ie(100, 320, 0, pen);
+  ie(80, 340, 0, pen);
+  ie(0, 0, 0, pen, release);
+  scribbleMode->setMode(MODE_STROKE);
+  // second page with a stroke
+  doCommand(ID_NEXTPAGENEW);
+  scribbleArea->gotoPos(1, Point(0,0));
+  s2(150, 150);
+
+  // unknown SVG content that must survive save/reopen: import via clipboard
+  SvgDocument* svgDoc = SvgParser().parseFragment(
+      "<g eraselock='preserve-me' transform='translate(60, 400)'>"
+      "<rect fill='rgba(255, 0, 0, 0.8)' stroke='none' x='0' y='0' width='20' height='20'/></g>");
+  Clipboard* clip = scribbleDoc->app->importExternalDoc(svgDoc);
+  scribbleDoc->app->clipboard.reset(clip);
+  scribbleDoc->app->clipboardPage = NULL;
+  doCommand(ID_PASTE);
+  scribbleArea->clearSelection();
+
+  auto countStrokes = [this]() {
+    int n = 0;
+    for(Page* page : scribbleDoc->document->pages)
+      n += page->strokeCount();
+    return n;
+  };
+  auto countPages = [this]() { return (int)scribbleDoc->document->pages.size(); };
+  auto fileContains = [](const char* filename, const char* needle) {
+    std::string content = readFile(filename);
+    return content.find(needle) != std::string::npos;
+  };
+
+  int nStrokes = countStrokes();
+  int nPages = countPages();
+  if(nStrokes < 6 || nPages != 2) {
+    SCRIBBLE_LOG("test16: unexpected corpus (pages=%d strokes=%d)", nPages, nStrokes);
+    ++errs;
+  }
+
+  std::string f_html = outPath + "/corpus.html";
+  std::string f_svg = outPath + "/corpus.svg";
+  std::string f_svgz = outPath + "/corpus.svgz";
+
+  // html cycle
+  if(!scribbleDoc->saveDocument(f_html.c_str()))
+    SCRIBBLE_LOG("test16: html save failed"), ++errs;
+  if(scribbleDoc->openDocument(f_html.c_str()) != Document::LOAD_OK)
+    SCRIBBLE_LOG("test16: html reopen failed"), ++errs;
+  if(scribbleDoc->document->ensurePagesLoaded(), countStrokes() != nStrokes || countPages() != nPages)
+    SCRIBBLE_LOG("test16: html roundtrip changed content (pages=%d strokes=%d)", countPages(), countStrokes()), ++errs;
+
+  // edit after reopen must be preserved by another cycle
+  s2(400, 400);
+  ++nStrokes;
+  if(!scribbleDoc->saveDocument(f_html.c_str()) || scribbleDoc->openDocument(f_html.c_str()) != Document::LOAD_OK
+      || (scribbleDoc->document->ensurePagesLoaded(), countStrokes()) != nStrokes)
+    SCRIBBLE_LOG("test16: html edit cycle failed"), ++errs;
+
+  // svg cycle: unknown attributes must be preserved
+  if(!scribbleDoc->saveDocument(f_svg.c_str()))
+    SCRIBBLE_LOG("test16: svg save failed"), ++errs;
+  if(!fileContains(f_svg.c_str(), "preserve-me")) {
+    SCRIBBLE_LOG("test16: unknown SVG attribute lost in svg save");
+    ++errs;
+  }
+  if(scribbleDoc->openDocument(f_svg.c_str()) != Document::LOAD_OK)
+    SCRIBBLE_LOG("test16: svg reopen failed"), ++errs;
+  if(scribbleDoc->document->ensurePagesLoaded(), countStrokes() != nStrokes || countPages() != nPages)
+    SCRIBBLE_LOG("test16: svg roundtrip changed content (pages=%d strokes=%d)", countPages(), countStrokes()), ++errs;
+  if(!scribbleDoc->saveDocument(f_svg.c_str()) || !fileContains(f_svg.c_str(), "preserve-me"))
+    SCRIBBLE_LOG("test16: unknown SVG attribute lost in second svg save"), ++errs;
+
+  // svgz cycle: gzip-compressed documents must carry the same content
+  if(!scribbleDoc->saveDocument(f_svgz.c_str()))
+    SCRIBBLE_LOG("test16: svgz save failed"), ++errs;
+  if(scribbleDoc->openDocument(f_svgz.c_str()) != Document::LOAD_OK)
+    SCRIBBLE_LOG("test16: svgz reopen failed"), ++errs;
+  if(scribbleDoc->document->ensurePagesLoaded(), countStrokes() != nStrokes || countPages() != nPages)
+    SCRIBBLE_LOG("test16: svgz roundtrip changed content (pages=%d strokes=%d)", countPages(), countStrokes()), ++errs;
+
+  // failure injection: save to a path whose parent directory does not exist
+  //  must fail (not silently report success)
+  if(scribbleDoc->saveDocument((outPath + "/no-such-dir-0123/corpus-fail.svg").c_str())) {
+    SCRIBBLE_LOG("test16: save to nonexistent directory reported success!");
+    ++errs;
+  }
+  // the last acknowledged save must still be recoverable after the failed save
+  if(scribbleDoc->openDocument(f_svgz.c_str()) != Document::LOAD_OK
+      || (scribbleDoc->document->ensurePagesLoaded(), countStrokes()) != nStrokes)
+    SCRIBBLE_LOG("test16: previously saved svgz not recoverable after failed save"), ++errs;
+
+  scribbleDoc->document->deleteFiles();
+  removeFile(f_html);
+  removeFile(f_svg);
+  removeFile(f_svgz);
+  if(errs > 0) {
+    nFailed += errs;
+    resultStr = fstring("test16: %d document-integrity errors", errs);
+  }
 }
 
 // back and forth test for whiteboard

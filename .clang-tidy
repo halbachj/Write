@@ -1,0 +1,27 @@
+# Correctness-oriented clang-tidy checks for Write.
+# Deliberately NOT enabled: modernize-* (unrelated churn for this codebase),
+# readability-* (style is clang-format's job), blanket -Werror on third-party
+# code (submodules are excluded from the run instead).
+# Run with a real compile database (scripts/check static captures one via bear).
+---
+Checks: >
+  -*,
+  bugprone-assert-side-effect,
+  bugprone-integer-division,
+  bugprone-macro-parentheses,
+  bugprone-sizeof-expression,
+  cert-err34-c,
+  clang-analyzer-core.*,
+  clang-analyzer-cplusplus.*,
+  clang-analyzer-security.*,
+  cert-oop57-cpp,
+  cert-str34-c,
+  hicpp-invalid-access-moved,
+  misc-throw-by-value-catch-by-reference,
+  performance-move-const-arg
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(?!.*(SDL|ugui|ulib|usvg|nanovgXC|pugixml|miniz|stb)/).*'
+FormatStyle: file
+CheckOptions:
+  - key: bugprone-sizeof-expression.WarnOnSizeOfIntegerExpression
+    value: 'true'

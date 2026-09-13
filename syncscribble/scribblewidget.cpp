@@ -109,22 +109,30 @@ ScribbleWidget::ScribbleWidget(ScribbleView* sv) : Widget(new SvgCustomNode), sc
       return scribbleView->doTimerEvent(0);
     }
     else if(event->type == SDL_MOUSEWHEEL) {
-      // since mouse wheel zooming was mainly added to support pinch zoom on Wacom tablets, we previously
-      //  didn't do it if pinch zoom was disabled for touch
-      //if(scribbleView->scribbleInput->multiTouchMode == INPUTMODE_ZOOM) {
-      uint32_t mods = (PLATFORM_WIN || PLATFORM_LINUX) ? (event->wheel.direction >> 16) : SDL_GetModState();
+      // use preciseX/preciseY (clean per-notch +/-1) instead of wheel.x/wheel.y: some SDL builds
+      //  (e.g. sdl2-compat over SDL3) leave x/y corrupt while sdlMouseEvent in svggui then scales x/y
+      //  by 120; replicate that scaling here from the precise values. SDL 2.0.9 on Android predates
+      //  precise wheel fields, where the original x/y behavior must remain.
+      uint32_t mods = SDL_GetModState();
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+      Dim dx = 120.0*event->wheel.preciseX;
+      Dim dy = 120.0*event->wheel.preciseY;
+#else
+      Dim dx = event->wheel.x;
+      Dim dy = event->wheel.y;
+#endif
       if(mods & KMOD_CTRL) {
         Dim speed = scribbleView->cfg->Float("wheelZoomSpeed")/120.0;
         Point p = window()->gui()->prevFingerPos - scribbleView->screenOrigin;
-        scribbleView->zoomBy(std::pow(1.25, speed*event->wheel.y), p.x, p.y);
+        scribbleView->zoomBy(std::pow(1.25, speed*dy), p.x, p.y);
         scribbleView->doRefresh();
       }
       else {
         Dim speed = scribbleView->cfg->Float("wheelScrollSpeed");
         if(mods & KMOD_SHIFT)
-          scribbleView->scrollBy(speed*event->wheel.y, -speed*event->wheel.x);
+          scribbleView->scrollBy(speed*dy, -speed*dx);
         else
-          scribbleView->scrollBy(-speed*event->wheel.x, speed*event->wheel.y);
+          scribbleView->scrollBy(-speed*dx, speed*dy);
       }
       return true;
     }

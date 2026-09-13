@@ -223,13 +223,15 @@ include Makefile.ios
 
 else ifneq ($(BUILD_SHARED_LIBRARY),)
 # Android
-# Uses SDL 2.0.9 (branch write-android)
+  # Uses the SDL submodule at the superproject's recorded gitlink. Do not
+  # switch to a moving branch as an implicit build step: CI and Nix initialize
+  # the recorded revision before building.
 # ./start_gradle assembleRelease && cp app/build/outputs/apk/release/app-release.apk . && ./resignapk.sh app-release.apk ~/styluslabs.keystore && mv signed_app-release.apk write300.apk
 
 # working dir is android/app apparently
-ifneq ($(shell git -C ../../../SDL rev-parse --abbrev-ref HEAD),write-android)
-  $(error Not on write-android branch!)
-endif
+  ifeq ($(wildcard ../../../SDL/Android.mk),)
+    $(error SDL submodule is missing; run git submodule update --init --recursive)
+  endif
 
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools"
   android:installLocation="auto">
 
   <!-- OpenGL ES 3.1 ... google play console complains even with required=false -->
@@ -58,8 +59,9 @@
           <category android:name="android.intent.category.DEFAULT"/>
           <data android:mimeType="image/*"/>
       </intent-filter>
-      <intent-filter>
-          <action android:name="android.intent.action.VIEW"/>
+      <!-- MIME-only local document handler, deliberately not an HTTP app link. -->
+      <intent-filter tools:ignore="AppLinkUrlError">
+        <action android:name="android.intent.action.VIEW"/>
           <action android:name="android.intent.action.EDIT"/>
           <category android:name="android.intent.category.DEFAULT"/>
           <data android:mimeType="text/html"/>

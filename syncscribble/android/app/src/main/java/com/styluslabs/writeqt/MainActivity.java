@@ -1,5 +1,6 @@
 package com.styluslabs.writeqt;
 
+import android.annotation.SuppressLint;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -198,7 +199,9 @@ public class MainActivity extends SDLActivity implements View.OnTouchListener, V
         mClipboardMgr = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
       if(mClipboardMgr != null) {
         ClipDescription desc = mClipboardMgr.getPrimaryClipDescription();
-        if(desc != null)
+        // ClipDescription#getTimestamp was added in API 26. Older supported
+        // devices have no clipboard serial; return -1 like the desktop fallback.
+        if(desc != null && android.os.Build.VERSION.SDK_INT >= 26)
           return (int) (desc.getTimestamp() & Integer.MAX_VALUE);
       }
       return -1;
@@ -259,9 +262,15 @@ public class MainActivity extends SDLActivity implements View.OnTouchListener, V
     startActivity(Intent.createChooser(intent, finaltitle));
   }
 
+  // CATEGORY_BROWSABLE excludes this activity's non-browsable MIME filter;
+  // lint does not model that category constraint (see intent construction).
+  @SuppressLint("UnsafeImplicitIntentLaunch")
   public void openUrl(String url)
   {
     Intent viewUrlIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+    // Limit URL dispatch to browsers/handlers that explicitly support browsable
+    // links; do not resolve Write's own MIME document intent filter.
+    viewUrlIntent.addCategory(Intent.CATEGORY_BROWSABLE);
     startActivity(viewUrlIntent);
   }
 
